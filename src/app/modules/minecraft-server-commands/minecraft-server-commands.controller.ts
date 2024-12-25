@@ -17,6 +17,11 @@ export class MinecraftServerCommandsController {
     return this.minecraftForgeServerService.runForgeInstaller(opts);
   }
 
+  @MessagePattern('run-install-mods')
+  runInstallMods(@Payload() opts: RunCommandOptions) {
+    return this.minecraftForgeServerService.runInstallMods(opts);
+  }
+
   @MessagePattern('run-forge-server')
   runForgeServer(@Payload() opts: RunCommandOptions) {
     return this.minecraftForgeServerService.runForgeServer(opts);

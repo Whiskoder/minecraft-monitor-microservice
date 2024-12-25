@@ -1,9 +1,16 @@
 import { Injectable } from '@nestjs/common';
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFile, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFile,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { catchError, Observable, switchMap, tap } from 'rxjs';
+import { catchError, forkJoin, Observable, of, switchMap, tap } from 'rxjs';
 import axios from 'axios';
 
 import { envs } from '@config/envs.config';
@@ -12,6 +19,7 @@ import { ServerTaskEntity } from '@modules/minecraft-server-commands/entities/se
 import { ServerEntity } from '@modules/minecraft-server-commands/entities/server.entity';
 import { writeFileObservable } from '@common/utils/write-file-observable.util';
 import { ForgeServerProcessSingleton } from '@modules/minecraft-server-commands/forge-server-process';
+import { readDirObservable } from '@common/utils/read-dir-observable.utils';
 
 export interface RunCommandOptions {
   tasks: ServerTaskEntity;
@@ -41,6 +49,8 @@ export class MinecraftServerCommandsService {
     const { server, tasks } = opts;
     const forgeServerDirectory = join(this.baseDir, 'servers', server.name);
     const forgeRunFileDirectory = join(forgeServerDirectory, 'run.bat');
+    const forgeInstallerDirectory = join(forgeServerDirectory, 'forge.jar');
+    const forgeDownloadUrl = `${this.apiHost}/api/v1/minecraft/forge/${server.forge.version}`;
 
     this.notifyTaskStatus({
       serverId: server.id,
@@ -54,17 +64,82 @@ export class MinecraftServerCommandsService {
           mkdirSync(forgeServerDirectory, { recursive: true });
         }),
         switchMap(() =>
-          this.downloadForgeInstaller(
-            server.forge.version,
-            forgeServerDirectory,
-          ),
+          this.downloadFile(forgeDownloadUrl, forgeInstallerDirectory),
         ),
-        switchMap((forgeInstallerDirectory) =>
+        switchMap(() =>
           this.runForgeInstallerProcess(
             forgeInstallerDirectory,
             forgeServerDirectory,
           ),
         ),
+        switchMap(() =>
+          this.notifyTaskStatus({
+            serverId: server.id,
+            taskId: tasks.id,
+            status: TaskStatus.SUCCESS,
+          }),
+        ),
+        catchError((e) =>
+          this.notifyTaskStatus({
+            serverId: server.id,
+            taskId: tasks.id,
+            status: TaskStatus.FAILED,
+            result: e.message,
+          }),
+        ),
+      )
+      .subscribe();
+  }
+
+  runInstallMods(opts: RunCommandOptions) {
+    const { server, tasks } = opts;
+
+    const forgeServerDirectory = join(this.baseDir, 'servers', server.name);
+    const installedModsDirectory = join(forgeServerDirectory, 'mods.txt');
+    const modsBaseDirectory = join(forgeServerDirectory, 'mods');
+
+    let installedMods: string[] = [];
+    if (existsSync(installedModsDirectory))
+      installedMods = readFileSync(installedModsDirectory, 'utf8')
+        .split(',')
+        .filter((modId) => modId);
+
+    const $downloadModObservers = server.mods
+      .filter((mod) => !installedMods.includes(mod.id)) // Filter mods that are already installed
+      .map((mod) => {
+        const modDownloadUrl = `${this.apiHost}/api/v1/minecraft/mods/${mod.id}`;
+        const modSaveDirectory = join(modsBaseDirectory, `${mod.id}.jar`);
+        return this.downloadFile(modDownloadUrl, modSaveDirectory);
+      });
+
+    this.notifyTaskStatus({
+      serverId: server.id,
+      taskId: tasks.id,
+      status: TaskStatus.RUNNING,
+    })
+      .pipe(
+        tap(() => {
+          if (!existsSync(join(forgeServerDirectory, 'run.bat')))
+            throw new Error('Forge server not found');
+
+          if (this.forgeServerInstance.$process)
+            throw new Error('Stop server before installing mods');
+
+          mkdirSync(modsBaseDirectory, { recursive: true });
+        }),
+        switchMap(() =>
+          $downloadModObservers.length > 0
+            ? forkJoin($downloadModObservers)
+            : of([]),
+        ),
+        switchMap(() => readDirObservable(modsBaseDirectory)),
+        switchMap((mods) =>
+          writeFileObservable(
+            installedModsDirectory,
+            mods.join(',').replaceAll('.jar', ''),
+          ),
+        ),
+        // TODO: Post installed mods to database
         switchMap(() =>
           this.notifyTaskStatus({
             serverId: server.id,
@@ -159,34 +234,27 @@ export class MinecraftServerCommandsService {
     return $request;
   };
 
-  private downloadForgeInstaller(
-    version: string,
-    forgeServerDirectory: string,
-  ): Observable<string> {
-    const $downloadForgeObservable = new Observable<string>((observer) => {
-      const url = `${this.apiHost}/api/v1/minecraft/forge/${version}`;
-
+  private downloadFile(
+    url: string,
+    saveFileDirectory: string,
+  ): Observable<void> {
+    const $downloadFileObservable = new Observable<void>((observer) => {
       axios
         .get(url, { responseType: 'arraybuffer' })
         .then(({ data }) => {
-          const forgeInstallerDirectory = join(
-            forgeServerDirectory,
-            'forge.jar',
-          );
-
-          writeFile(forgeInstallerDirectory, Buffer.from(data), (e) => {
-            if (e) throw new Error('Error saving forge installer');
-            observer.next(forgeInstallerDirectory);
+          writeFile(saveFileDirectory, Buffer.from(data), (e) => {
+            if (e) throw new Error('Error saving file');
+            observer.next();
             observer.complete();
           });
         })
         .catch((e) => {
-          if (e.status === 404) throw new Error('Forge version not found');
-          throw new Error('Error downloading Forge installer');
+          if (e.status === 404) throw new Error('File not found');
+          throw new Error('Error downloading file');
         });
     });
 
-    return $downloadForgeObservable;
+    return $downloadFileObservable;
   }
 
   private runForgeInstallerProcess(
