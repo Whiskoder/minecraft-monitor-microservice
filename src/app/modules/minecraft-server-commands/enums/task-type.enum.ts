@@ -1,0 +1,4 @@
+export enum TaskType {
+  FORGE_INSTALLER = 'FORGE_INSTALLER',
+  MOD_INSTALLER = 'MOD_INSTALLER',
+}

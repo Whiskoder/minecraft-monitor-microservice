@@ -1,4 +1,4 @@
-export class RunMinecraftForgeServerDto {
+export class RunForgeServerDto {
   name: string;
   // This should be in GB
   maxMemory: number;
