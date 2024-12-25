@@ -31,4 +31,9 @@ export class MinecraftServerCommandsController {
   stopForgeServer(@Payload() opts: RunCommandOptions) {
     return this.minecraftForgeServerService.stopForgeServer(opts);
   }
+
+  @MessagePattern('kill-forge-server')
+  killForgeServer(@Payload() opts: RunCommandOptions) {
+    return this.minecraftForgeServerService.killForgeServer(opts);
+  }
 }

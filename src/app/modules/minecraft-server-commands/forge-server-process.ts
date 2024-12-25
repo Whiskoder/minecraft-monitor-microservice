@@ -25,10 +25,10 @@ export class ForgeServerProcessSingleton {
     this.forgeServerProcess = forgeServerProcess;
   }
 
-  public $stop() {
+  public $kill() {
     if (this.forgeServerProcess)
-      kill(this.forgeServerProcess.pid, '-15', (err) => {
-        if (err) throw err;
+      kill(this.forgeServerProcess.pid, '-15', (e) => {
+        if (e) console.log(e);
       });
     this.forgeServerProcess = undefined;
   }

@@ -4,7 +4,6 @@ import { spawn } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
-  readdirSync,
   readFileSync,
   writeFile,
   writeFileSync,
@@ -12,6 +11,7 @@ import {
 import { join } from 'node:path';
 import { catchError, forkJoin, Observable, of, switchMap, tap } from 'rxjs';
 import axios from 'axios';
+import pidtree from 'pidtree';
 
 import { envs } from '@config/envs.config';
 import { TaskStatus } from '@modules/minecraft-server-commands/enums/task-status.enum';
@@ -185,7 +185,7 @@ export class MinecraftServerCommandsService {
         switchMap(() => writeFileObservable(userJvmArgsPath, memoryArgs)),
         switchMap(() => writeFileObservable(eulaFilePath, 'eula=true')),
         tap(() => {
-          this.runForgeServerProcess(forgeServerDirectory);
+          this.runForgeServerProcess(forgeServerDirectory, server.id, tasks.id);
         }),
         catchError((e) =>
           this.notifyTaskStatus({
@@ -201,15 +201,53 @@ export class MinecraftServerCommandsService {
 
   stopForgeServer(opts: RunCommandOptions) {
     const { server, tasks } = opts;
+    if (!this.forgeServerInstance.$process) {
+      this.notifyTaskStatus({
+        serverId: server.id,
+        taskId: tasks.id,
+        status: TaskStatus.FAILED,
+        result: 'Error stopping server',
+      }).subscribe();
+      return;
+    }
 
-    this.forgeServerInstance.$stop();
+    pidtree(
+      this.forgeServerInstance.$process.pid,
+      { root: true },
+      (e, pids) => {
+        console.log(pids);
+      },
+    );
 
-    this.notifyTaskStatus({
-      serverId: server.id,
-      taskId: tasks.id,
-      status: TaskStatus.TERMINATED,
-      result: 'Server stopped by user',
-    }).subscribe();
+    this.forgeServerInstance.$process.stdin.emit('data', '\n');
+
+    this.forgeServerInstance.$process.stdin.write('stop');
+
+    this.forgeServerInstance.$process.stdin.on('data', (data) => {
+      console.log(data.toString());
+    });
+  }
+
+  killForgeServer(opts: RunCommandOptions) {
+    const { server, tasks } = opts;
+
+    if (!this.forgeServerInstance.$process) {
+      this.notifyTaskStatus({
+        serverId: server.id,
+        taskId: tasks.id,
+        status: TaskStatus.FAILED,
+        result: 'Error killing server',
+      }).subscribe();
+      return;
+    }
+
+    this.forgeServerInstance.$kill();
+  }
+
+  runServerCommand(opts: RunCommandOptions) {
+    const { server, tasks } = opts;
+
+    // this.forgeServerInstance.$process.stdin.write(server.command);
   }
 
   private notifyTaskStatus = (
@@ -312,7 +350,11 @@ export class MinecraftServerCommandsService {
     return $install;
   }
 
-  private runForgeServerProcess(forgeServerDirectory: string) {
+  private runForgeServerProcess(
+    forgeServerDirectory: string,
+    serverId: string,
+    taskId: string,
+  ) {
     // Switch between cmd and bash based on the OS
     const isWindows = process.platform === 'win32';
     const args = isWindows ? ['/c', 'run.bat', 'nogui'] : ['run.sh', 'nogui'];
@@ -325,24 +367,33 @@ export class MinecraftServerCommandsService {
 
     // TODO: Store logs
     this.forgeServerInstance.$process.stdout.on('data', (data) => {
+      if (data.toString().includes('Presione una tecla para continuar'))
+        this.forgeServerInstance.$process.stdin.write(' ');
       console.log(data.toString());
     });
 
-    // TODO: Notify task status on exit
+    const onServerStop = (message: string) => {
+      this.notifyTaskStatus({
+        serverId,
+        taskId,
+        status: TaskStatus.TERMINATED,
+        result: message,
+      }).subscribe();
+    };
 
     this.forgeServerInstance.$process.on('exit', (code) => {
-      console.log(`Forge server exited with code ${code}`);
-      this.forgeServerInstance.$stop();
+      onServerStop(`Server stopped with code ${code}`);
+      this.forgeServerInstance.$kill();
     });
 
     this.forgeServerInstance.$process.on('error', (e) => {
-      console.log(`Forge server error: ${e}`);
-      this.forgeServerInstance.$stop();
+      onServerStop(`Server stopped by error: ${e}`);
+      this.forgeServerInstance.$kill();
     });
 
     process.on('exit', () => {
-      console.log('Process exited');
-      this.forgeServerInstance.$stop();
+      onServerStop('Server stopped by process exit');
+      this.forgeServerInstance.$kill();
     });
   }
 }
